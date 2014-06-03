@@ -1,0 +1,464 @@
+#!/usr/bin/env ruby
+# this script builds, creates a tag and builds the iphone app
+
+require 'rubygems'
+require 'zerg_xcode' # https://github.com/ddribin/zerg_xcode used to modify xcode project
+require 'readline'
+require 'json'
+require 'right_aws'
+
+#  -Have the "right_aws" gem installed (do sudo gem install right_aws)
+#  -Have the "zerg_xcode" gem installed (do sudo gem install zerg_xcode)
+#  -Have the "iPhone Distribution: ZangZing LLC" certificate with private key (disclosure triangle) on your keychain
+#  -Have chef environment installed. This script uses "/var/chef/amazon.json" to retrieve keys
+
+
+# env settings
+HOME=ENV["HOME"]
+S3KEYS="/var/chef/amazon.json"
+IOS_BUILDS_BUCKET="ios-builds.zz"
+LOG_FILE   = Time.now.strftime("%Y%m%d-%H%M%S")+"-build_ipa.log"
+PLISTBUDDY = "/usr/libexec/PlistBuddy"
+
+# apple provisioning profiles
+$ad_hoc           = true
+APPSTORE_PP       = "/tools/provisioning-profiles/ZangZing_AppStore.mobileprovision"
+ADHOC_PP          = "/tools/provisioning-profiles/ZangZing_AdHoc.mobileprovision"
+ADHOC_DEV_PP      = "/tools/provisioning-profiles/ZangZing_Development.mobileprovision"
+
+SIGNING_IDENTITY  = "iPhone Distribution: ZangZing LLC"
+
+# application packaging
+$prod_pack         = false
+PROD_BUNDLE_ID     = "com.zangzing.ZangZing"
+PROD_BUNDLE_NAME   = "ZangZing"
+PROD_TARGET        = "ZangZing Production"
+PROD_INFOPLIST     = "Config/ZangZing-Pro-Info.plist"
+PROD_SCHEME        = "ZangZing"
+
+DEV_BUNDLE_ID     = "com.zangzing.ZangZingDev"
+DEV_BUNDLE_NAME   = "ZZ Dev"
+DEV_TARGET        = "ZangZingDev"
+DEV_INFOPLIST     = "Config/ZangZing-Dev-Info.plist"
+DEV_SCHEME        = "ZangZingDev"
+
+# xcodebuild settings
+PROJECT       = "ZangZing.xcodeproj"
+CONFIGURATION = "Release"
+SDK           = "iphoneos5.1"
+
+#test flight settings
+TF_API_URL="http://testflightapp.com/api/builds.json"
+TF_API_TOKEN="f2c042f3825b2e7b505865c6685891e2_MzE5NjAyMjAxMi0wMi0xNiAwMTozOTo0NC44NDY3MTM"
+TF_TEAM_TOKEN="72bec7743538a16d9a8c500923f4b8b2_MjQ5NjYyMDExLTExLTAzIDE2OjAzOjExLjAwODc5Mw"
+TF_DIST_1="iPhoneDevTeam"
+TF_DIST_2="ZangZingers"
+TF_DIST_3="Richa"
+TF_DIST_4="All"
+RELEASE_NOTES="ReleaseNotes.txt"
+
+
+def init_log_file( filename )
+  f = File.open( filename, 'w' )
+  f.puts( "== Build started at #{Time.now.strftime("%H:%M:%S %d/%m/%Y")}")  
+  return f
+end
+
+def start_console( filename )
+`/usr/bin/open -a /Applications/Utilities/Console.app #{filename}`
+end
+
+# Asks if the user wants to continue. If no it exits
+def confirm_continue
+  print "Do you want to continue? (Yes/n): "
+  r = Readline.readline()
+  if r != "Yes"
+    log " Confirm Continue did not receive Yes. Exiting. Bye."
+    exit
+  end
+end
+
+# Asks if the user wants to build AdHoc or AppStore Releases
+def ask_profile
+  print "Do you want AppStore distribution? [Yes/no]      (default AdHoc): "
+  r = Readline.readline()
+  if r == "Yes"
+    $ad_hoc    = false
+    $prod_pack = true
+    #log "Building an IPA for === AppStore === distribution"
+    confirm_continue
+  else
+    print "Do you want Production Packaging? [Yes/no] (default Dev package): "
+    r = Readline.readline();
+    if( r == "Yes" )
+      $ad_hoc = true
+      $prod_pack = true
+      #log "Building app in PRODUCTION PACKAGE for AD HOC distribution"
+    else
+      $ad_hoc = true
+      $prod_pack = false
+      #log "Building app in DEV PACKAGE for AD HOC distribution"
+    end
+  end
+end
+
+# Executes System Commands after echoing them onto the screen
+def do_cmd(cmd)
+  cmd = cmd+" 2>&1"
+  if $logfile
+    $logfile.puts( cmd )
+    $logfile.puts `#{cmd}`
+  else
+    puts `#{cmd}`
+  end
+end
+
+def log( msg )
+  $logfile.puts( "==  "+msg )
+  $logfile.flush
+  puts "==  "+msg
+end
+
+#Gets the uuid from a provisioning profile
+def get_profile_id( pp )
+    File.open(pp,"r") {|f|
+        raw = f.read
+        nice = raw.gsub("\n","").gsub("\r","").
+            gsub("\t","").gsub(" ","")
+        matches = nice.scan(/UUID<\/key><string>(.*)<\/string>/)
+        return matches.first.first
+    }
+    log("Couldn't find UUID in: " + pp)
+    abort("Couldn't find UUID in: " + pp)
+end
+
+# Installs a profile into the Xcode blessed location so we can compile against it and returns it's uuid
+def install_profile( pp)
+    log( "Installing Provisioning Profile: #{File.basename(pp)} ...")
+    uuid = get_profile_id( pp )
+    dest = File.expand_path("#{HOME}/Library/MobileDevice/Provisioning Profiles/#{uuid}.mobileprovision")
+    do_cmd("cp \"#{pp}\" \"#{dest}\"")
+    uuid
+end
+
+# Update the project to set the profile etc because
+# xcodebuild only pays lip service to command line args
+def doctor_project(project,target, identity, profileUuid)
+  log( "Modifiying Project FIle to sign with #{identity} identity ...")
+
+  project = ZergXcode.load(project)
+  configuration = 'Release'
+  build_configurations = project["buildConfigurationList"]["buildConfigurations"]
+  configuration_object = build_configurations.select { |item|  item['name'] == configuration }[0]
+  configuration_object["buildSettings"]["PROVISIONING_PROFILE"] = profileUuid
+  configuration_object["buildSettings"]["PROVISIONING_PROFILE[sdk=iphoneos*]"] = profileUuid
+  configuration_object["buildSettings"]["CODE_SIGN_IDENTITY"] = identity
+  configuration_object["buildSettings"]["CODE_SIGN_IDENTITY[sdk=iphoneos*]"] = identity
+
+  target = project["targets"].select {|item| item['name'] == target }[0]
+  build_configurations = target["buildConfigurationList"]["buildConfigurations"]
+  configuration_object = build_configurations.select {|item|item['name'] == configuration }[0]
+  configuration_object["buildSettings"]["PROVISIONING_PROFILE[sdk=iphoneos*]"] = profileUuid
+  configuration_object["buildSettings"]["CODE_SIGN_IDENTITY[sdk=iphoneos*]"] = identity
+
+  project.save!
+end
+
+def setup_info_plist( info_plist, id, name)
+      log( "Setting ZangZingInfo.plist CFBundleName=#{name} CFBundleIdentifier=#{id} ..." )
+      do_cmd("#{PLISTBUDDY} -c \"Set :CFBundleDisplayName #{name}\" \"#{info_plist}\"")
+      do_cmd("#{PLISTBUDDY} -c \"Set :CFBundleName #{name}\" \"#{info_plist}\"")
+      do_cmd("#{PLISTBUDDY} -c \"Set :CFBundleIdentifier #{id}\" \"#{info_plist}\"")
+end
+
+
+# Store file in S3 
+def s3_upload( file_name, destination_name )
+  #log("Uploading #{file_name} to S3 as #{destination_name} ...")
+  #load keys
+  json = File.read(S3KEYS)
+  ak = JSON.parse(json)
+  aws_access_key_id = ak['aws_access_key_id']  
+  aws_secret_access_key = ak['aws_secret_access_key']
+
+  #establish S3 connection 
+  s3 = RightAws::S3.new(aws_access_key_id, aws_secret_access_key, {:logger       =>Logger.new(  File.open( LOG_FILE, 'a' ) )})
+  bucket = s3.bucket(IOS_BUILDS_BUCKET)
+  #upload file 
+  file = File.open( file_name )
+  bucket.put( destination_name,  file )    
+end
+
+def ask_testflight
+  # Ask if you want to upload to TF
+  print "Do you want to upload to TestFlight? [Yes/n]        (default no): "
+  r = Readline.readline()
+  if r != "Yes"
+    return [ false, "", "", "" ]
+  end
+
+  puts ""
+  puts "-------------- TestFlight Distribution Lists --------------------"
+  puts ""
+  puts "                1.- #{TF_DIST_1}"
+  puts "                2.- #{TF_DIST_2}"
+  puts "                3.- #{TF_DIST_3}"
+  if $prod_pack 
+    puts "                4.- All" 
+  end
+  puts ""
+  print "Select TestFlight Distribution List               (default is 1): "
+
+  r= Readline.readline()
+  distribution = case(r)
+  when '4' then TF_DIST_4 
+  when '3' then TF_DIST_3
+  when '2' then TF_DIST_4 
+  when '1' then TF_DIST_1
+  else  TF_DIST_1 
+  end
+  print "Notify TestFlight Dist. Members by Email? [Yes/n]    (default n): "
+  r=Readline.readline()
+  if( r == 'Yes')
+    notify = 'True'
+  else
+    notify = "False"
+  end
+  notes = RELEASE_NOTES
+  print "REMBEMBERED TO UPDATE ReleaseNotes.txt? [Yes/n]      (default n): "
+  r=Readline.readline()
+  if( r != 'Yes')
+    exit
+  end  
+  #log("Testflight setup to go to distribution:#{distribution} with notify=#{notify} notes=#{notes}")  
+  return [ true, notes, distribution, notify ]
+end
+
+def testflight_upload( ipa, notes, distribution, notify )  
+  cmd = []
+  cmd << "curl"
+  cmd << TF_API_URL
+  cmd << "-F file=@\'#{ipa}\'"
+  cmd << "-F api_token='#{TF_API_TOKEN}'"
+  cmd << "-F team_token='#{TF_TEAM_TOKEN}'"
+  if( notes && notes.length >0)
+    cmd << "-F notes=\"#{notes}\""
+  else
+    cmd << "-F notes=\"Great new features, just try it!\""
+  end
+  cmd << "-F notify=#{notify}"
+  cmd << "-F distribution_lists='#{distribution}'"
+  cmd = cmd.flatten.compact.join(" ").strip.squeeze(" ")
+  log( "Uploading to TestFlight Distribution List : #{distribution}"+ (notify=='True'? ' and will send them email' : ' without notification') )
+  log( cmd )
+  result = `#{cmd}`
+  log("Testflight upload result: #{result}")
+  json_result = JSON.parse( result )
+  return json_result
+end
+
+def load_release_notes( dirname, filename )
+  log "Loading Release Notes"
+  fullname = File.join( dirname, filename)
+  the_notes = "";
+  release_notes = File.open( fullname )
+  release_notes.each_line do |line|
+    break if /^# === END OF NOTES ===$/.match( line )
+    next if /^#/.match( line ) 
+    the_notes += line;
+  end
+  return the_notes
+end
+
+#============================================ MAIN =================================
+
+# Get the tag
+#puts
+tag =""
+while tag.length <=0 do
+  print "Enter the tag for the build                          (mandatory): "
+  tag = Readline.readline()
+end 
+tag_comment = "-m 'No comment.'"
+
+#get the branch
+#puts
+print "Type the branch/tag name to use for the tag   (blank for master): "
+branch = Readline.readline()
+branch = "master" if branch.empty?
+
+# Get profile information
+ask_profile
+
+# get testflight info
+upload_to_testflight, notes, distribution, notify  = ask_testflight
+
+
+
+#generate buildnumber and location vars(using same script as build scheme)
+puts "Setting up clean build directory..."
+cur_dir = Dir.pwd
+Dir.chdir("../")
+base_dir = Dir.pwd
+auto_deploy_dir = base_dir + "/auto_deploy"
+repo = "zziphone"
+repo_dir = auto_deploy_dir + "/" + repo
+Dir.mkdir(auto_deploy_dir) rescue nil
+Dir.chdir(auto_deploy_dir)
+puts "Getting source tree from git..."
+url = "git@github.com:zangzing/" + repo + ".git"
+do_cmd("git clone #{url}")
+Dir.chdir(repo_dir)
+
+#start a log file
+$logfile = init_log_file "#{repo_dir}/#{LOG_FILE}"
+
+log( "Analyzing source....")
+#Get the source from git
+log( "Checking out the #{branch} branch...")
+do_cmd("git remote show origin")
+do_cmd("git fetch")
+do_cmd("git checkout -f #{branch}")
+do_cmd("git pull origin #{branch}")
+
+do_cmd("PROJECT_DIR=#{repo_dir} ./tools/buildnumber.sh")
+GIT_HASH=`cd #{repo_dir}; git rev-parse --verify HEAD`
+BUILD_LINE=`#{repo_dir}; git rev-list --reverse HEAD | grep -n #{GIT_HASH}`
+BUILD_NUMBER= BUILD_LINE.split(':')[0]
+Dir.mkdir("#{repo_dir}/build") rescue nil
+if $ad_hoc
+  if $prod_pack 
+    dist_string = "ADHOC"
+    BUILD_DIR="#{repo_dir}/build/#{BUILD_NUMBER}-ADHOC"
+  else
+    dist_string = "ADHOC-DEV"
+    BUILD_DIR="#{repo_dir}/build/#{BUILD_NUMBER}-ADHOC-DEV"    
+  end
+else
+  dist_string = "APPSTORE"
+  BUILD_DIR="#{repo_dir}/build/#{BUILD_NUMBER}-APPSTORE"
+end 
+Dir.mkdir( BUILD_DIR ) rescue nil
+
+
+#final confirmation
+log("")
+log("------------------ Confirm Build Settings -----------------------")
+log("")
+log("Git TAG         : #{tag}")
+log("Git Branch      : #{branch}")
+log("Build Number    : #{BUILD_NUMBER}")
+log("Going to        : #{BUILD_DIR}")
+log("Packaging       : #{($prod_pack ? "Production" : "Development")}")
+log("Distribution    : #{($ad_hoc ? "Ad Hoc" : "AppStore")}")
+if upload_to_testflight
+  log("Testflight      : YES")
+  log("   Distribution : #{distribution}")
+  log("   Notify Emails: #{notify}")
+  log("   Release Notes: #{notes}")
+else
+  log("Testflight      : NO")
+end
+log("")
+confirm_continue
+start_console( "#{repo_dir}/#{LOG_FILE}" )
+
+
+
+# create alternate clean directory and subdirs
+log( "Tagging with #{tag}...")
+do_cmd("git tag -a #{tag} #{tag_comment}")
+do_cmd("git push origin #{tag}")
+
+
+#install appropriate provisioning profile and setup project to use it
+# set target
+if $ad_hoc
+  if $prod_pack
+    $target=PROD_TARGET
+    $scheme=PROD_SCHEME
+    profile_id = install_profile "#{repo_dir}#{ADHOC_PP}"
+    INFO_PLIST="#{repo_dir}/#{PROD_INFOPLIST}"
+    setup_info_plist INFO_PLIST, PROD_BUNDLE_ID, PROD_BUNDLE_NAME
+  else
+    $target=DEV_TARGET
+    $scheme=DEV_SCHEME
+    profile_id = install_profile "#{repo_dir}#{ADHOC_DEV_PP}"    
+    INFO_PLIST="#{repo_dir}/#{DEV_INFOPLIST}"
+    setup_info_plist INFO_PLIST, DEV_BUNDLE_ID, DEV_BUNDLE_NAME
+  end    
+else
+  $target=PROD_TARGET
+  $scheme=DEV_SCHEME
+  profile_id = install_profile "#{repo_dir}#{APPSTORE_PP}"
+  INFO_PLIST="#{repo_dir}/#{PROD_INFOPLIST}"
+  setup_info_plist INFO_PLIST, PROD_BUNDLE_ID, PROD_BUNDLE_NAME
+end  
+doctor_project "#{repo_dir}/#{PROJECT}",$target, SIGNING_IDENTITY, profile_id
+
+
+#rename Archives directory to have a clean place to store the new archive
+log("Backing up local xcode Archives directory ...")
+do_cmd("mv #{HOME}/Library/Developer/Xcode/Archives #{HOME}/Library/Developer/Xcode/Archives.STOCK");
+do_cmd("mkdir #{HOME}/Library/Developer/Xcode/Archives")
+
+#clean build directory
+log("Cleaning previous builds if any ...")
+do_cmd("rm -rf #{repo_dir}/build/*")
+
+#build xcarchive
+log("Building xcarchive ...")
+do_cmd("xcodebuild -target #{$target} -configuration #{CONFIGURATION} -scheme #{$scheme} -sdk #{SDK}  clean archive")
+
+
+#move just built archive to our builds directory
+#xarchive is saved in dir like ~/Library/Developer/Xcode/Archives/yyyy-mm-dd/MyArchive.xcarchive
+log("Moving xcarchive to build directory ...")
+xcarchive = "#{BUILD_DIR}/ZangZing-#{BUILD_NUMBER}.xcarchive"
+do_cmd("mkdir #{BUILD_DIR}")
+do_cmd("mv #{HOME}/Library/Developer/Xcode/Archives/*/ZangZing*.xcarchive #{xcarchive}");
+
+#restore archives directory
+log("Restoring up local xcode Archives directory ...")
+do_cmd("rmdir #{HOME}/Library/Developer/Xcode/Archives/*")
+do_cmd("rmdir #{HOME}/Library/Developer/Xcode/Archives")
+do_cmd("mv #{HOME}/Library/Developer/Xcode/Archives.STOCK #{HOME}/Library/Developer/Xcode/Archives");
+
+#Create IPA
+log("Packaging application into .IPA ...")
+app = Dir["#{xcarchive}/Products/Applications/*.app"].first
+ipa = "#{BUILD_DIR}/" + File.basename(app).gsub('.app', '.ipa')
+do_cmd("/usr/bin/xcrun -sdk #{SDK} PackageApplication  #{app} -o #{ipa}")
+
+#Save IPA and to S3
+s3directory = Time.now().strftime( "zziphone/#{BUILD_NUMBER}-#{dist_string}/%Y%m%d-%H%M%S/")
+destination = s3directory+File.basename(app).gsub('.app', '.ipa')
+log "Saving IPA to S3 ..."
+s3_upload( ipa, destination)
+
+#ZIP ARCHIVE FOR STORAGE
+# -r means to recurse through folders, -q quiets the output,
+# -y to preserve symlinks so as to not break codesigning
+log("Zipping xcarchive for storage...")
+xcarchive_zip = "#{BUILD_DIR}/ZangZing-#{BUILD_NUMBER}.zip"
+do_cmd("zip -rqy #{xcarchive_zip}  #{xcarchive}")
+
+#Save xcarchive zip to S3
+destination = s3directory+"ZangZing-#{BUILD_NUMBER}.zip"
+log "Saving #{xcarchive_zip} to S3 ..."
+s3_upload( xcarchive_zip, destination )
+
+#Upload ipa to testflight
+if $ad_hoc && upload_to_testflight
+  release_notes = load_release_notes( repo_dir, notes)
+  log "Uploading IPA to Testflight ..."
+  upload_result = testflight_upload( ipa, release_notes, distribution, notify )
+  do_cmd("open #{upload_result['config_url']}");
+end
+
+log "==== Build Finished Succesfully.====="
+$logfile.flush
+$logfile.close
+
+
+ 

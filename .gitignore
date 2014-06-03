@@ -1,0 +1,15 @@
+.DS_Store
+**/*.pbxuser
+*.mode1
+*.mode2v3
+*.mode1v3
+**/*.perspectivev*
+*~.nib
+*.swp
+**/xcuserdata/*
+InfoPlist.h
+Moment.xcodeproj/xcuserdata/*
+Moment.xcodeproj/project.xcworkspace/xcuserdata/*
+build/
+*.log
+Classes/zzglobal.m

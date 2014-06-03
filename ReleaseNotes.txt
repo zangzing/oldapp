@@ -1,0 +1,93 @@
+#
+#  ZZiPhone RELEASE NOTES  
+#
+#  Instructions
+#  Any line that starts with a # will be treated as a comment and not included in the release notes
+#  The current release notes should appear before the marker line  === END OF NOTES === 
+#  anything after that marker will not be included in the release notes so old notes can be saved
+#  below the marker and current notes added above the marker. 
+#
+#
+
+# ---------- Mar 14 Facebook Auth (450)
+Hi everyone,
+
+Sharing to Facebook is now enabled. You can turn the Facebook switch ON when you add photos to post them on your timeline, use the share message to add some context. If you want to stream every photo to Facebook, create a new album and turn its Facebook switch ON at creation time. Each time you add photos, they will be posted to your timeline.
+
+Remember, if you have any problems, please send us a note to help@zangzing.com
+
+Team ZangZing
+
+
+
+# =================================================================================
+# === END OF NOTES ===
+# =================================================================================
+#
+
+# ------- Mar 2 2012 Album Sharing/Groups (400)
+
+Hi everyone,
+
+Thanks for the ongoing help in testing our iPhone app. This latest release has two really great things that we'd love for you to try out.
+
+1. Take Photos, Create New Albums and Share
+Once you tap the yellow camera icon, take a photo and tap upload, you can now choose to create a new album and share it via email! From the upload screen, simply tap 'Choose or Create New Album' and then in the top, tap 'New Album'. From there you can name the album, set the privacy and share via email. (Facebook and Twitter are up next). Whoever you invite via email will be remembered. Also, any time you add new photos to that album, that list of people will be emailed letting them know about the new photos. 
+
+2. Saving Groups
+One other thing that we've added is the ability to create a group of people via Email and save them as a Group. Any Group can then be easily used over and over again for all your album sharing. 
+
+By the way, if you are new to the iPhone app, you can sign in under the Me button with your existing ZangZing account. We don't support creating new accounts just yet…
+
+Thanks for trying it out and please send bugs, feedback, questions to us at help@zangzing.com
+
+Team ZangZing
+
+
+# =================================================================================
+# === END OF NOTES ===
+# =================================================================================
+#
+
+# ------- Feb 21 2012 Album Sharing/Demo Build by PB
+
+Demo Groups/Album Sharing
+
+# ------- Feb 21 2012 New Album by MAA
+
+This release includes:
+
+- Ability to create new albums when uploading photos
+- ZangZing API foundation classes
+- Standard sub classes for common view controller features
+
+
+# ------- Feb 16 2012 Test of Release notes format by MAA
+
+This 10 lines notes are to test the release notes file format
+1 This is the first line of ten
+2 When I also do I say mee two
+3 Not of thy but of thee it is not two but three
+4 I have no idea what this note is for
+5 Golden Rings
+6 Six sugar styx
+7 The seventh line and only three to go
+8 Lorem Ipsum Dolor
+
+9 Nine with a space above and below
+
+10 the last line in this set
+
+
+# OLD notes below this marker will not be included in build (no comments necessary)
+#
+
+
+------   Feb 16 2012  New Album by MAA -------------
+New Album Functionality
+First Release of the ZZAPI layer
+Some groups screens enabled
+New UnitTest suite started
+
+
+
